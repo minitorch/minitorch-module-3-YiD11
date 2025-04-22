@@ -5,6 +5,7 @@ import itertools
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Type
 
 import numpy as np
+import numpy.typing as npt 
 from typing_extensions import Protocol, Sequence
 
 from . import operators
@@ -23,30 +24,31 @@ if TYPE_CHECKING:
 
 class MapProto(Protocol):
     def __call__(self, x: Tensor, out: Optional[Tensor] = ..., /) -> Tensor:
+        """Call a map function"""
         ...
 
 
 class TensorOps:
     @staticmethod
     def map(fn: Callable[[float], float]) -> MapProto:
-        pass
+        """Map placeholder"""
+        ...
 
     @staticmethod
-    def cmap(fn: Callable[[float], float]) -> Callable[[Tensor, Tensor], Tensor]:
-        pass
-
-    @staticmethod
-    def zip(fn: Callable[[float, float], float]) -> Callable[[Tensor, Tensor], Tensor]:
-        pass
+    def zip(
+        fn: Callable[[float, float], float],
+    ) -> Callable[[Tensor, Tensor], Tensor]:
+        """Zip placeholder"""
+        ...
 
     @staticmethod
     def reduce(
         fn: Callable[[float, float], float], start: float = 0.0
-    ) -> Callable[[Tensor, int], Tensor]:
-        pass
+    ) -> Callable[[Tensor, int], Tensor]: ...
 
     @staticmethod
     def matrix_multiply(a: Tensor, b: Tensor) -> Tensor:
+        """Matrix multiply"""
         raise NotImplementedError("Not implemented in this assignment")
 
     cuda = False
@@ -74,7 +76,6 @@ class TensorBackend:
         self.log_map = ops.map(operators.log)
         self.exp_map = ops.map(operators.exp)
         self.id_map = ops.map(operators.id)
-        self.id_cmap = ops.cmap(operators.id)
         self.inv_map = ops.map(operators.inv)
 
         # Zips
@@ -224,6 +225,7 @@ class SimpleOps(TensorOps):
 
     @staticmethod
     def matrix_multiply(a: "Tensor", b: "Tensor") -> "Tensor":
+        """Matrix multiplication"""
         raise NotImplementedError("Not implemented in this assignment")
 
     is_cuda = False
@@ -231,10 +233,10 @@ class SimpleOps(TensorOps):
 
 # Implementations.
 
-def _shape_size_diff(out_shape: Shape, in_shape: Shape) -> int:
+def shape_size_diff(out_shape: Shape, in_shape: Shape) -> int:
     return abs(len(out_shape) - len(in_shape))
 
-def index_permutation(shape: Sequence, strides: Sequence) -> Sequence[Sequence[int]]:
+def index_permutation(shape: Shape, strides: Strides) -> npt.NDArray[np.int32]:
     """
     Generates a permutation of indices for a given shape and computes their corresponding 
     linear indices based on the provided strides.
@@ -266,7 +268,7 @@ def index_broadcast(
         out_strides: Strides,
         in_shape: Shape,
         in_strides: Strides,
-) -> tuple[Sequence[int], Sequence[int]]:
+) -> tuple[Index, Index]:
     """
     Computes the broadcasted indices for input and output tensors based on their shapes and strides.
         This function calculates the indices required to map elements from an input tensor
@@ -295,9 +297,9 @@ def index_broadcast(
             this function computes the indices required to broadcast the input tensor
             to match the output tensor.
     """
-    shape_size_diff = _shape_size_diff(out_shape, in_shape)
-    in_shape_extend = np.concatenate([[1] * shape_size_diff, in_shape], axis=0) if shape_size_diff > 0 else in_shape
-    in_strides_extend = np.concatenate([[in_strides[0]] * shape_size_diff, in_strides], axis=0) if shape_size_diff > 0 else in_strides
+    diff_num = shape_size_diff(out_shape, in_shape)
+    in_shape_extend = np.concatenate([[1] * diff_num, in_shape], axis=0) if diff_num > 0 else in_shape
+    in_strides_extend = np.concatenate([[in_strides[0]] * diff_num, in_strides], axis=0) if diff_num > 0 else in_strides
 
     diff_indices = np.where(in_shape_extend != out_shape)[0]
     same_indices = np.where(in_shape_extend == out_shape)[0]
@@ -379,78 +381,78 @@ def tensor_map(fn: Callable[[float], float]) -> Any:
         # assert len(np.unique(in_indices)) == len(in_indices) and len(np.unique(out_indices)) == len(out_indices), f"in_shape = {in_shape}, in_strides = {in_strides}, in_indices = {in_indices}, out_shape = {out_shape}, out_strides = {out_strides}, out_indices = {out_indices}, "
         out[out_indices] = np.vectorize(fn)(in_storage[in_indices])
     
-    def _map_(
-        out: Storage,
-        out_shape: Shape,
-        out_strides: Strides,
-        in_storage: Storage,
-        in_shape: Shape,
-        in_strides: Strides,
-    ) -> None:
-        if np.equal(out_shape, in_shape).all():
-            _simple_map(0, len(out_shape), [], out, out_shape, out_strides, in_storage, in_shape, in_strides)
-        elif len(in_shape) <= len(out_shape) and shape_broadcast(in_shape, out_shape) == out_shape:
-            _broadcasted_map(0, len(out_shape), out, [], out_shape, out_strides, in_storage, [], in_shape, in_strides)
+    # def _map_(
+    #     out: Storage,
+    #     out_shape: Shape,
+    #     out_strides: Strides,
+    #     in_storage: Storage,
+    #     in_shape: Shape,
+    #     in_strides: Strides,
+    # ) -> None:
+    #     if np.equal(out_shape, in_shape).all():
+    #         _simple_map(0, len(out_shape), [], out, out_shape, out_strides, in_storage, in_shape, in_strides)
+    #     elif len(in_shape) <= len(out_shape) and shape_broadcast(in_shape, out_shape) == out_shape:
+    #         _broadcasted_map(0, len(out_shape), out, [], out_shape, out_strides, in_storage, [], in_shape, in_strides)
             
-    def _simple_map(
-        dep: int,
-        max_dep: int,
-        index: Sequence[int],
-        out: Storage,
-        out_shape: Shape,
-        out_strides: Strides,
-        in_storage: Storage,
-        in_shape: Shape,
-        in_strides: Strides,
-    ):
-        if dep == max_dep:
-            out_pos = index_to_position(index, out_strides)
-            in_pos = index_to_position(index, in_strides)
-            out[out_pos] = fn(in_storage[in_pos])
-            return
+    # def _simple_map(
+    #     dep: int,
+    #     max_dep: int,
+    #     index: Sequence[int],
+    #     out: Storage,
+    #     out_shape: Shape,
+    #     out_strides: Strides,
+    #     in_storage: Storage,
+    #     in_shape: Shape,
+    #     in_strides: Strides,
+    # ):
+    #     if dep == max_dep:
+    #         out_pos = index_to_position(index, out_strides)
+    #         in_pos = index_to_position(index, in_strides)
+    #         out[out_pos] = fn(in_storage[in_pos])
+    #         return
 
-        for i in range(out_shape[dep]):
-            index.append(i)
-            _simple_map(dep + 1, max_dep, index, out, out_shape, out_strides, in_storage, in_shape, in_strides)
-            index.pop()
+    #     for i in range(out_shape[dep]):
+    #         index.append(i)
+    #         _simple_map(dep + 1, max_dep, index, out, out_shape, out_strides, in_storage, in_shape, in_strides)
+    #         index.pop()
 
-    def _broadcasted_map(
-        dep: int,
-        max_dep: int,
-        out_storage: Storage,
-        out_index: Sequence[int],
-        out_shape: Shape,
-        out_strides: Strides,
-        in_storage: Storage,
-        in_index: Sequence[int],
-        in_shape: Shape,
-        in_strides: Strides,
-    ):
-        diff = _shape_size_diff(out_shape, in_shape)
-        if dep == max_dep:
-            out_pos = index_to_position(out_index, out_strides)
-            in_pos = index_to_position(in_index, in_strides)
-            out_shape[out_pos] = fn(in_storage[in_pos])
-            return
+    # def _broadcasted_map(
+    #     dep: int,
+    #     max_dep: int,
+    #     out_storage: Storage,
+    #     out_index: Sequence[int],
+    #     out_shape: Shape,
+    #     out_strides: Strides,
+    #     in_storage: Storage,
+    #     in_index: Sequence[int],
+    #     in_shape: Shape,
+    #     in_strides: Strides,
+    # ):
+    #     diff = _shape_size_diff(out_shape, in_shape)
+    #     if dep == max_dep:
+    #         out_pos = index_to_position(out_index, out_strides)
+    #         in_pos = index_to_position(in_index, in_strides)
+    #         out_shape[out_pos] = fn(in_storage[in_pos])
+    #         return
         
-        for i in range(out_shape[dep]):
-            if dep < diff:
-                out_index.append(i)
-                _broadcasted_map(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides)
-                out_index.pop()
-            elif in_shape[dep] == 1:
-                out_index.append(i)
-                in_index.append(0)
-                _broadcasted_map(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides)
-                out_index.pop()
-                in_index.pop()
-            else:
-                assert in_shape[dep] == out_shape[dep], f"Shape mismatch: input shape: {in_shape}, output shape: {out_shape}"
-                out_index.append(i)
-                in_index.append(i)
-                _broadcasted_map(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides)
-                out_index.pop()
-                in_index.pop()
+    #     for i in range(out_shape[dep]):
+    #         if dep < diff:
+    #             out_index.append(i)
+    #             _broadcasted_map(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides)
+    #             out_index.pop()
+    #         elif in_shape[dep] == 1:
+    #             out_index.append(i)
+    #             in_index.append(0)
+    #             _broadcasted_map(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides)
+    #             out_index.pop()
+    #             in_index.pop()
+    #         else:
+    #             assert in_shape[dep] == out_shape[dep], f"Shape mismatch: input shape: {in_shape}, output shape: {out_shape}"
+    #             out_index.append(i)
+    #             in_index.append(i)
+    #             _broadcasted_map(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides)
+    #             out_index.pop()
+    #             in_index.pop()
     
     return _map
 
@@ -504,95 +506,95 @@ def tensor_zip(fn: Callable[[float, float], float]) -> Any:
         out[out_indices] = np.vectorize(fn)(a_storage[a_indices], b_storage[b_indices])
 
     
-    def _zip_(
-        out: Storage,
-        out_shape: Shape,
-        out_strides: Strides,
-        a_storage: Storage,
-        a_shape: Shape,
-        a_strides: Strides,
-        b_storage: Storage,
-        b_shape: Shape,
-        b_strides: Strides,
-    ) -> None:
-        if np.equal(out_shape, a_shape).all() and np.equal(out_shape, b_shape).all():
-            _simple_zip(0, len(out_shape), [], out, out_shape, out_strides, a_storage, a_shape, a_strides, b_storage, b_shape, b_strides)
-        elif len(a_shape) <= len(out_shape) and shape_broadcast(a_shape, out_shape) == out_shape:
-            assert len(a_shape) == len(b_shape), f"Shape mismatch: input shape: {a_shape}, b shape: {b_shape}"
-            _broadcasted_zip(0, len(out_shape), out, [], out_shape, out_strides, a_storage, [], a_shape, a_strides, b_storage, [], b_shape, b_strides)
+    # def _zip_(
+    #     out: Storage,
+    #     out_shape: Shape,
+    #     out_strides: Strides,
+    #     a_storage: Storage,
+    #     a_shape: Shape,
+    #     a_strides: Strides,
+    #     b_storage: Storage,
+    #     b_shape: Shape,
+    #     b_strides: Strides,
+    # ) -> None:
+    #     if np.equal(out_shape, a_shape).all() and np.equal(out_shape, b_shape).all():
+    #         _simple_zip(0, len(out_shape), [], out, out_shape, out_strides, a_storage, a_shape, a_strides, b_storage, b_shape, b_strides)
+    #     elif len(a_shape) <= len(out_shape) and shape_broadcast(a_shape, out_shape) == out_shape:
+    #         assert len(a_shape) == len(b_shape), f"Shape mismatch: input shape: {a_shape}, b shape: {b_shape}"
+    #         _broadcasted_zip(0, len(out_shape), out, [], out_shape, out_strides, a_storage, [], a_shape, a_strides, b_storage, [], b_shape, b_strides)
 
-    def _simple_zip(
-        dep: int,
-        max_dep: int,
-        index: Sequence[int],
-        out_storage: Storage,
-        out_shape: Shape,
-        out_strides: Strides,
-        a_storage: Storage,
-        a_shape: Shape,
-        a_strides: Strides,
-        b_storage: Storage,
-        b_shape: Shape,
-        b_strides: Strides,
-    ):
-        if dep == max_dep:
-            out_pos = index_to_position(index, out_strides)
-            a_pos = index_to_position(index, a_strides)
-            b_pos = index_to_position(index, b_strides)
-            out_storage[out_pos] = fn(a_storage[a_pos], b_storage[b_pos])
-            return
+    # def _simple_zip(
+    #     dep: int,
+    #     max_dep: int,
+    #     index: List[int],
+    #     out_storage: Storage,
+    #     out_shape: Shape,
+    #     out_strides: Strides,
+    #     a_storage: Storage,
+    #     a_shape: Shape,
+    #     a_strides: Strides,
+    #     b_storage: Storage,
+    #     b_shape: Shape,
+    #     b_strides: Strides,
+    # ):
+    #     if dep == max_dep:
+    #         out_pos = index_to_position(index, out_strides)
+    #         a_pos = index_to_position(index, a_strides)
+    #         b_pos = index_to_position(index, b_strides)
+    #         out_storage[out_pos] = fn(a_storage[a_pos], b_storage[b_pos])
+    #         return
         
-        for i in range(out_shape[dep]):
-            index.append(i)
-            _simple_zip(dep + 1, max_dep, index, out_storage, out_shape, out_strides, a_storage, a_shape, a_strides, b_storage, b_shape, b_strides)
-            index.pop()
+    #     for i in range(out_shape[dep]):
+    #         index.append(i)
+    #         _simple_zip(dep + 1, max_dep, index, out_storage, out_shape, out_strides, a_storage, a_shape, a_strides, b_storage, b_shape, b_strides)
+    #         index.pop()
     
-    def _broadcasted_zip(
-        dep: int,
-        max_dep: int,
-        out_storage: Storage,
-        out_index: Sequence[int],
-        out_shape: Shape,
-        out_strides: Strides,
-        a_storage: Storage,
-        a_index: Sequence[int],
-        a_shape: Shape,
-        a_strides: Strides,
-        b_storage: Storage,
-        b_index: Sequence[int],
-        b_shape: Shape,
-        b_strides: Strides,
-    ):
-        diff = _shape_size_diff(out_shape, a_shape)
-        if dep == max_dep:
-            out_pos = index_to_position(out_index, out_strides)
-            a_pos = index_to_position(a_index, a_strides)
-            b_pos = index_to_position(b_index, b_strides)
-            out[out_pos] = fn(a_storage[a_pos], b_storage[b_pos])
-            return
+    # def _broadcasted_zip(
+    #     dep: int,
+    #     max_dep: int,
+    #     out_storage: Storage,
+    #     out_index: Sequence[int],
+    #     out_shape: Shape,
+    #     out_strides: Strides,
+    #     a_storage: Storage,
+    #     a_index: Sequence[int],
+    #     a_shape: Shape,
+    #     a_strides: Strides,
+    #     b_storage: Storage,
+    #     b_index: Sequence[int],
+    #     b_shape: Shape,
+    #     b_strides: Strides,
+    # ):
+    #     diff = _shape_size_diff(out_shape, a_shape)
+    #     if dep == max_dep:
+    #         out_pos = index_to_position(out_index, out_strides)
+    #         a_pos = index_to_position(a_index, a_strides)
+    #         b_pos = index_to_position(b_index, b_strides)
+    #         out[out_pos] = fn(a_storage[a_pos], b_storage[b_pos])
+    #         return
         
-        for i in range(out_shape[dep]):
-            if dep < diff:
-                out_index.append(i)
-                _broadcasted_zip(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, a_storage, a_index, a_shape, a_strides, b_storage, b_index, b_shape, b_strides)
-                out_index.pop()
-            elif a_shape[dep] == 1:
-                out_index.append(i)
-                a_index.append(0)
-                b_index.append(0)
-                _broadcasted_zip(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, a_storage, a_index, a_shape, a_strides, b_storage, b_index, b_shape, b_strides)
-                out_index.pop()
-                a_index.pop()
-                b_index.pop()
-            else:
-                assert a_shape[dep] == out_shape[dep], f"Shape mismatch: input shape: {a_shape}, output shape: {out_shape}"
-                out_index.append(i)
-                a_index.append(i)
-                b_index.append(i)
-                _broadcasted_zip(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, a_storage, a_index, a_shape, a_strides, b_storage, b_index, b_shape, b_strides)
-                out_index.pop()
-                a_index.pop()
-                b_index.pop()
+    #     for i in range(out_shape[dep]):
+    #         if dep < diff:
+    #             out_index.append(i)
+    #             _broadcasted_zip(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, a_storage, a_index, a_shape, a_strides, b_storage, b_index, b_shape, b_strides)
+    #             out_index.pop()
+    #         elif a_shape[dep] == 1:
+    #             out_index.append(i)
+    #             a_index.append(0)
+    #             b_index.append(0)
+    #             _broadcasted_zip(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, a_storage, a_index, a_shape, a_strides, b_storage, b_index, b_shape, b_strides)
+    #             out_index.pop()
+    #             a_index.pop()
+    #             b_index.pop()
+    #         else:
+    #             assert a_shape[dep] == out_shape[dep], f"Shape mismatch: input shape: {a_shape}, output shape: {out_shape}"
+    #             out_index.append(i)
+    #             a_index.append(i)
+    #             b_index.append(i)
+    #             _broadcasted_zip(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, a_storage, a_index, a_shape, a_strides, b_storage, b_index, b_shape, b_strides)
+    #             out_index.pop()
+    #             a_index.pop()
+    #             b_index.pop()
 
     return _zip
 
@@ -639,59 +641,60 @@ def tensor_reduce(fn: Callable[[float, float], float]) -> Any:
         return
         
         
-    def _reduce_(
-        out: Storage,
-        out_shape: Shape,
-        out_strides: Strides,
-        a_storage: Storage,
-        a_shape: Shape,
-        a_strides: Strides,
-        reduce_dim: int,
-    ) -> None:
-        _recursive_reduce(
-            0,
-            len(out_shape),
-            out,
-            [],
-            out_shape,
-            out_strides,
-            a_storage,
-            [],
-            a_shape,
-            a_strides,
-            reduce_dim,
-        )
+    # def _reduce_(
+    #     out: Storage,
+    #     out_shape: Shape,
+    #     out_strides: Strides,
+    #     a_storage: Storage,
+    #     a_shape: Shape,
+    #     a_strides: Strides,
+    #     reduce_dim: int,
+    # ) -> None:
+    #     _recursive_reduce(
+    #         0,
+    #         len(out_shape),
+    #         out,
+    #         [],
+    #         out_shape,
+    #         out_strides,
+    #         a_storage,
+    #         [],
+    #         a_shape,
+    #         a_strides,
+    #         reduce_dim,
+    #     )
 
-    def _recursive_reduce(
-        dep: int,
-        max_dep: int,
-        out_storage: Storage,
-        out_index: List[int],
-        out_shape: Shape,
-        out_strides: Strides,
-        in_storage: Storage,
-        in_index: List[int],
-        in_shape: Shape,
-        in_strides: Strides,
-        reduce_dim: int,
-    ):
-        if dep == max_dep:
-            out_pos = index_to_position(out_index, out_strides)
-            for i in range(in_shape[reduce_dim]):
-                in_index[reduce_dim] = i
-                in_pos = index_to_position(in_index, in_strides)
-                if i == 0:
-                    out_storage[out_pos] = in_storage[in_pos]
-                else:
-                    out_storage[out_pos] = fn(out_storage[out_pos], in_storage[in_pos])
-            return
+    # def _recursive_reduce(
+    #     dep: int,
+    #     max_dep: int,
+    #     out_storage: Storage,
+    #     out_index: List[int],
+    #     out_shape: Shape,
+    #     out_strides: Strides,
+    #     in_storage: Storage,
+    #     in_index: List[int],
+    #     in_shape: Shape,
+    #     in_strides: Strides,
+    #     reduce_dim: int,
+    # ):
+    #     if dep == max_dep:
+    #         out_pos = index_to_position(out_index, out_strides)
+    #         for i in range(in_shape[reduce_dim]):
+    #             in_index[reduce_dim] = i
+    #             in_pos = index_to_position(in_index, in_strides)
+    #             if i == 0:
+    #                 out_storage[out_pos] = in_storage[in_pos]
+    #             else:
+    #                 out_storage[out_pos] = fn(out_storage[out_pos], in_storage[in_pos])
+    #         return
 
-        for i in range(out_shape[dep]):
-            in_index.append(i)
-            out_index.append(i)
-            _recursive_reduce(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides, reduce_dim)
-            out_index.pop()
-            in_index.pop()
+    #     for i in range(out_shape[dep]):
+    #         in_index.append(i)
+    #         out_index.append(i)
+    #         _recursive_reduce(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides, reduce_dim)
+    #         out_index.pop()
+    #         in_index.pop()
+
     return _reduce
 
 

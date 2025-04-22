@@ -13,7 +13,7 @@ from .tensor_data import (
     shape_broadcast,
     to_index,
 )
-from .tensor_ops import MapProto, TensorOps
+from .tensor_ops import MapProto, TensorOps, index_broadcast, index_permutation, shape_size_diff
 
 if TYPE_CHECKING:
     from typing import Callable, Optional
@@ -36,7 +36,9 @@ def njit(fn: Fn, **kwargs: Any) -> Fn:
 to_index = njit(to_index)
 index_to_position = njit(index_to_position)
 broadcast_index = njit(broadcast_index)
-
+index_broadcast = njit(index_broadcast)
+index_permutation = njit(index_permutation)
+shape_size_diff = njit(shape_size_diff)
 
 class FastOps(TensorOps):
     @staticmethod
@@ -160,6 +162,8 @@ def tensor_map(
 
     """
 
+    # fn = njit(fn)
+    
     def _map(
         out: Storage,
         out_shape: Shape,
@@ -168,8 +172,9 @@ def tensor_map(
         in_shape: Shape,
         in_strides: Strides,
     ) -> None:
-        # TODO: Implement for Task 3.1.
-        raise NotImplementedError("Need to implement for Task 3.1")
+        out_indices, in_indices = index_broadcast(out_shape, out_strides, in_shape, in_strides)
+        for i in prange(len(out_indices)):
+            out[out_indices[i]] = fn(in_storage[in_indices[i]])
 
     return njit(_map, parallel=True)  # type: ignore
 
@@ -196,6 +201,8 @@ def tensor_zip(
         Tensor zip function.
 
     """
+    
+    fn = njit(fn)
 
     def _zip(
         out: Storage,
@@ -208,8 +215,10 @@ def tensor_zip(
         b_shape: Shape,
         b_strides: Strides,
     ) -> None:
-        # TODO: Implement for Task 3.1.
-        raise NotImplementedError("Need to implement for Task 3.1")
+        out_indices, a_indices = index_broadcast(out_shape, out_strides, a_shape, a_strides)
+        _, b_indices = index_broadcast(out_shape, out_strides, b_shape, b_strides)
+        for i in prange(len(out_indices)):
+            out[out_indices[i]] = fn(a_storage[a_indices[i]], b_storage[b_indices[i]])
 
     return njit(_zip, parallel=True)  # type: ignore
 
@@ -244,8 +253,15 @@ def tensor_reduce(
         a_strides: Strides,
         reduce_dim: int,
     ) -> None:
-        # TODO: Implement for Task 3.1.
-        raise NotImplementedError("Need to implement for Task 3.1")
+        a_indices = index_permutation(
+            np.concatenate([a_shape[:reduce_dim], a_shape[reduce_dim + 1:]], axis=0),
+            np.concatenate([a_strides[:reduce_dim], a_strides[reduce_dim + 1:]], axis=0),
+        )
+        out_indices = index_permutation(out_shape, out_strides)
+        for i in prange(a_shape[reduce_dim]):
+            a_reduce_indices = a_indices + np.ones_like(a_indices) * i * a_strides[reduce_dim]
+            out[out_indices] = np.vectorize(fn)(out[out_indices], a_storage[a_reduce_indices])
+        return
 
     return njit(_reduce, parallel=True)  # type: ignore
 
