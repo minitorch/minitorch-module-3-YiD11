@@ -63,9 +63,9 @@ def lt(a: float, b: float) -> float:
     """Less than."""
     return a < b
 
-def eq(a: float, b: float) -> float:
+def eq(a: float, b: float) -> bool:
     """Equal."""
-    return float(a == b)
+    return a == b
 
 def max(a: float, b: float) -> float:
     """Maximum of two numbers."""

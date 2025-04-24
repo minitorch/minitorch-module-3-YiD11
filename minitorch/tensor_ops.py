@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from functools import cache
 import itertools
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Type
+from turtle import shapesize
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Type, TypeVar
 
 import numpy as np
 import numpy.typing as npt 
 from typing_extensions import Protocol, Sequence
+
+from numba import prange
+from numba import njit as _njit
 
 from . import operators
 from .tensor_data import (
@@ -21,6 +25,9 @@ if TYPE_CHECKING:
     from .tensor import Tensor
     from .tensor_data import Index, Shape, Storage, Strides
 
+Fn = TypeVar("Fn")
+def njit(fn: Fn, **kwargs: Any) -> Fn:
+    return _njit(inline="always", **kwargs)(fn)  # type: ignore
 
 class MapProto(Protocol):
     def __call__(self, x: Tensor, out: Optional[Tensor] = ..., /) -> Tensor:
@@ -254,14 +261,27 @@ def index_permutation(shape: Shape, strides: Strides) -> npt.NDArray[np.int32]:
         permutations of indices for the shape (e.g., (0, 0), (0, 1), ..., (1, 2)) and compute 
         their linear indices based on the strides.
     """
-    import itertools
-    return np.sum(
-        np.array(
-            list(itertools.product(*[np.arange(i) for i in shape])),
-            dtype=np.int32,
-        ) * strides,
-        axis=-1,
-    )
+    permut_size = np.prod(shape)
+    dim_size = len(shape)
+    shape_cumprod = np.cumprod(shape)
+    indices = np.arange(permut_size)
+    ret = np.zeros((permut_size,), dtype=np.int32)
+    for i in range(dim_size):
+        real_stride = shape_cumprod[-1] // shape_cumprod[i]
+        ret[indices] += (indices // real_stride) % shape[i] * strides[i]
+    return ret
+
+def index_permutation_pair(index1: npt.NDArray[np.int32], index2: npt.NDArray[np.int32]) -> npt.NDArray[np.int32]:
+    """
+    Return:
+        Permutation of input
+    """
+    n1, n2 = index1.shape[0], index2.shape[0]
+    n = n1 * n2
+    ret = np.zeros((n), dtype=np.int32)
+    ret_index_permut = np.arange(n)
+    ret[ret_index_permut] = index1[ret_index_permut // n2 % n1] + index1[ret_index_permut % n2]
+    return ret
 
 def index_broadcast(
         out_shape: Shape,
@@ -275,71 +295,97 @@ def index_broadcast(
         to an output tensor when broadcasting is applied. It ensures that the input tensor
         can be broadcast to match the output tensor's shape and computes the corresponding
         indices for both tensors.
-        Args:
-            out_shape (Shape): The shape of the output tensor.
-            out_strides (Strides): The strides of the output tensor.
-            in_shape (Shape): The shape of the input tensor.
-            in_strides (Strides): The strides of the input tensor.
-        Returns:
-            tuple[Sequence[int], Sequence[int]]: A tuple containing two sequences:
-                - The indices for the output tensor.
-                - The indices for the input tensor.
-        Raises:
-            AssertionError: If the input shape cannot be broadcast to the output shape.
-        Notes:
-            - Broadcasting rules are applied to align the input tensor's shape with the
-              output tensor's shape.
-            - The function handles cases where the input tensor's shape has fewer dimensions
-              than the output tensor's shape by extending the input shape with ones.
-            - The indices are computed in a way that respects the broadcasting semantics.
-        Example:
-            Given an input tensor of shape (1, 3) and an output tensor of shape (2, 3),
-            this function computes the indices required to broadcast the input tensor
-            to match the output tensor.
+    Args:
+        out_shape (Shape): The shape of the output tensor.
+        out_strides (Strides): The strides of the output tensor.
+        in_shape (Shape): The shape of the input tensor.
+        in_strides (Strides): The strides of the input tensor.
+    Returns:
+        tuple[Sequence[int], Sequence[int]]: A tuple containing two sequences:
+            - The indices for the output tensor.
+            - The indices for the input tensor.
+    Raises:
+        AssertionError: If the input shape cannot be broadcast to the output shape.
+    Notes:
+        - Broadcasting rules are applied to align the input tensor's shape with the
+            output tensor's shape.
+        - The function handles cases where the input tensor's shape has fewer dimensions
+            than the output tensor's shape by extending the input shape with ones.
+        - The indices are computed in a way that respects the broadcasting semantics.
+    Example:
+        Given an input tensor of shape (1, 3) and an output tensor of shape (2, 3),
+        this function computes the indices required to broadcast the input tensor
+        to match the output tensor.
     """
     diff_num = shape_size_diff(out_shape, in_shape)
-    in_shape_extend = np.concatenate([[1] * diff_num, in_shape], axis=0) if diff_num > 0 else in_shape
-    in_strides_extend = np.concatenate([[in_strides[0]] * diff_num, in_strides], axis=0) if diff_num > 0 else in_strides
+    in_shape_extend = np.ones((diff_num + len(in_shape)), dtype=np.int32)
+    in_shape_extend[diff_num:] = in_shape
+    in_strides_extend = np.zeros((diff_num + len(in_shape)), dtype=np.int32)
+    in_strides_extend[diff_num:] = in_strides    
 
     diff_indices = np.where(in_shape_extend != out_shape)[0]
     same_indices = np.where(in_shape_extend == out_shape)[0]
-    split_index = len(diff_indices)
-    assert np.all(in_shape_extend[diff_indices] == 1), f"input shape: {in_shape_extend} cannot broadcast to output shape: {out_shape}"
     
-    in_shape_extend = np.concatenate([in_shape_extend[diff_indices], in_shape_extend[same_indices]], axis=0)
-    in_strides_extend = np.concatenate([in_strides_extend[diff_indices], in_strides_extend[same_indices]], axis=0)
-    
-    out_shape = np.concatenate([out_shape[diff_indices], out_shape[same_indices]], axis=0)
-    out_strides = np.concatenate([out_strides[diff_indices], out_strides[same_indices]], axis=0)
-    
-    in_right_indices = index_permutation(in_shape_extend[split_index:], in_strides_extend[split_index:])
-    out_right_indices = index_permutation(out_shape[split_index:], out_strides[split_index:])
+    diff_indices_size = len(diff_indices)
+    same_indices_size = len(same_indices)
+    in_shape_reorder = np.empty_like(in_shape_extend, dtype=np.int32)
+    for i in prange(diff_indices_size):
+        in_shape_reorder[i] = in_shape_extend[diff_indices[i]]
+    for i in prange(len(same_indices)):
+        in_shape_reorder[diff_indices_size + i] = in_shape_extend[same_indices[i]]
 
-    if split_index > 0:
-        in_left_indices = index_permutation(in_shape_extend[:split_index], in_strides_extend[:split_index])
-        out_left_indices = index_permutation(out_shape[:split_index], out_strides[:split_index])
-        in_indices = np.sum(
-            np.array(list(
-                itertools.product(in_left_indices, in_right_indices),
-            )),
-            axis=-1,
-        )
-        out_indices = np.sum(
-            np.array(list(
-                itertools.product(out_left_indices, out_right_indices),
-            )),
-            axis=-1,
-        )
-    else:
+    in_strides_reorder = np.empty_like(in_strides_extend, dtype=np.int32)
+    for i in prange(diff_indices_size):
+        in_strides_reorder[i] = in_strides_extend[diff_indices[i]]
+    for i in prange(len(same_indices)):
+        in_strides_reorder[diff_indices_size + i] = in_strides_extend[same_indices[i]]
+    
+    out_shape_reorder = np.empty_like(out_shape, dtype=np.int32)
+    for i in prange(diff_indices_size):
+        out_shape_reorder[i] = out_shape[diff_indices[i]]
+    for i in prange(len(same_indices)):
+        out_shape_reorder[diff_indices_size + i] = out_shape[same_indices[i]]
+
+    out_strides_reorder = np.empty_like(out_strides, dtype=np.int32)
+    for i in prange(len(diff_indices)):
+        out_strides_reorder[i] = out_strides[diff_indices[i]]
+    for i in prange(len(same_indices)):
+        out_strides_reorder[len(diff_indices) + i] = out_strides[same_indices[i]]
+
+    if same_indices_size == 0:
+        in_left_indices = index_permutation(in_shape_reorder[:diff_indices_size], in_strides_reorder[:diff_indices_size])
+        out_left_indices = index_permutation(out_shape_reorder[:diff_indices_size], out_strides_reorder[:diff_indices_size])
+        in_indices = in_left_indices
+        out_indices = out_left_indices
+    elif diff_indices_size == 0:
+        in_right_indices = index_permutation(in_shape_reorder[diff_indices_size:], in_strides_reorder[diff_indices_size:])
+        out_right_indices = index_permutation(out_shape_reorder[diff_indices_size:], out_strides_reorder[diff_indices_size:])
         in_indices = in_right_indices
         out_indices = out_right_indices
-    k = len(out_indices) // len(in_indices)
-    if k > 1:
-        in_indices = np.tile(in_indices, k)
+    else:
+        in_left_indices = index_permutation(in_shape_reorder[:diff_indices_size], in_strides_reorder[:diff_indices_size])
+        in_right_indices = index_permutation(in_shape_reorder[diff_indices_size:], in_strides_reorder[diff_indices_size:])
+        
+        out_left_indices = index_permutation(out_shape_reorder[:diff_indices_size], out_strides_reorder[:diff_indices_size])
+        out_right_indices = index_permutation(out_shape_reorder[diff_indices_size:], out_strides_reorder[diff_indices_size:])
 
-    return out_indices, in_indices
+        in_indices = index_permutation_pair(in_left_indices, in_right_indices)
+        out_indices = index_permutation_pair(out_left_indices, out_right_indices)
 
-def tensor_map(fn: Callable[[float], float]) -> Any:
+    in_aligned_indices = np.zeros((out_indices.shape[0],), dtype=np.int32)
+    for i in prange(out_indices.shape[0] // in_indices.shape[0]):
+        in_aligned_indices[i * len(in_indices) : (i + 1) * len(in_indices)] = in_indices
+    return out_indices, in_aligned_indices
+
+shape_size_diff = njit(shape_size_diff)
+index_broadcast = njit(index_broadcast)
+index_permutation = njit(index_permutation)
+index_permutation_pair = njit(index_permutation_pair)
+
+def tensor_map(
+    fn: Callable[[float], float],
+    ) -> Callable[[Storage, Shape, Strides, Storage, Shape, Strides], None]:
+
     """
     Low-level implementation of tensor map between
     tensors with *possibly different strides*.
@@ -378,86 +424,17 @@ def tensor_map(fn: Callable[[float], float]) -> Any:
         in_strides: Strides,
     ) -> None:
         out_indices, in_indices = index_broadcast(out_shape, out_strides, in_shape, in_strides)
-        # assert len(np.unique(in_indices)) == len(in_indices) and len(np.unique(out_indices)) == len(out_indices), f"in_shape = {in_shape}, in_strides = {in_strides}, in_indices = {in_indices}, out_shape = {out_shape}, out_strides = {out_strides}, out_indices = {out_indices}, "
         out[out_indices] = np.vectorize(fn)(in_storage[in_indices])
-    
-    # def _map_(
-    #     out: Storage,
-    #     out_shape: Shape,
-    #     out_strides: Strides,
-    #     in_storage: Storage,
-    #     in_shape: Shape,
-    #     in_strides: Strides,
-    # ) -> None:
-    #     if np.equal(out_shape, in_shape).all():
-    #         _simple_map(0, len(out_shape), [], out, out_shape, out_strides, in_storage, in_shape, in_strides)
-    #     elif len(in_shape) <= len(out_shape) and shape_broadcast(in_shape, out_shape) == out_shape:
-    #         _broadcasted_map(0, len(out_shape), out, [], out_shape, out_strides, in_storage, [], in_shape, in_strides)
-            
-    # def _simple_map(
-    #     dep: int,
-    #     max_dep: int,
-    #     index: Sequence[int],
-    #     out: Storage,
-    #     out_shape: Shape,
-    #     out_strides: Strides,
-    #     in_storage: Storage,
-    #     in_shape: Shape,
-    #     in_strides: Strides,
-    # ):
-    #     if dep == max_dep:
-    #         out_pos = index_to_position(index, out_strides)
-    #         in_pos = index_to_position(index, in_strides)
-    #         out[out_pos] = fn(in_storage[in_pos])
-    #         return
-
-    #     for i in range(out_shape[dep]):
-    #         index.append(i)
-    #         _simple_map(dep + 1, max_dep, index, out, out_shape, out_strides, in_storage, in_shape, in_strides)
-    #         index.pop()
-
-    # def _broadcasted_map(
-    #     dep: int,
-    #     max_dep: int,
-    #     out_storage: Storage,
-    #     out_index: Sequence[int],
-    #     out_shape: Shape,
-    #     out_strides: Strides,
-    #     in_storage: Storage,
-    #     in_index: Sequence[int],
-    #     in_shape: Shape,
-    #     in_strides: Strides,
-    # ):
-    #     diff = _shape_size_diff(out_shape, in_shape)
-    #     if dep == max_dep:
-    #         out_pos = index_to_position(out_index, out_strides)
-    #         in_pos = index_to_position(in_index, in_strides)
-    #         out_shape[out_pos] = fn(in_storage[in_pos])
-    #         return
-        
-    #     for i in range(out_shape[dep]):
-    #         if dep < diff:
-    #             out_index.append(i)
-    #             _broadcasted_map(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides)
-    #             out_index.pop()
-    #         elif in_shape[dep] == 1:
-    #             out_index.append(i)
-    #             in_index.append(0)
-    #             _broadcasted_map(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides)
-    #             out_index.pop()
-    #             in_index.pop()
-    #         else:
-    #             assert in_shape[dep] == out_shape[dep], f"Shape mismatch: input shape: {in_shape}, output shape: {out_shape}"
-    #             out_index.append(i)
-    #             in_index.append(i)
-    #             _broadcasted_map(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides)
-    #             out_index.pop()
-    #             in_index.pop()
     
     return _map
 
 
-def tensor_zip(fn: Callable[[float, float], float]) -> Any:
+def tensor_zip(
+    fn: Callable[[float, float], float],
+) -> Callable[
+    [Storage, Shape, Strides, Storage, Shape, Strides, Storage, Shape, Strides],
+    None,
+]:
     """
     Low-level implementation of tensor zip between
     tensors with *possibly different strides*.
@@ -505,101 +482,12 @@ def tensor_zip(fn: Callable[[float, float], float]) -> Any:
         _, b_indices = index_broadcast(out_shape, out_strides, b_shape, b_strides)
         out[out_indices] = np.vectorize(fn)(a_storage[a_indices], b_storage[b_indices])
 
-    
-    # def _zip_(
-    #     out: Storage,
-    #     out_shape: Shape,
-    #     out_strides: Strides,
-    #     a_storage: Storage,
-    #     a_shape: Shape,
-    #     a_strides: Strides,
-    #     b_storage: Storage,
-    #     b_shape: Shape,
-    #     b_strides: Strides,
-    # ) -> None:
-    #     if np.equal(out_shape, a_shape).all() and np.equal(out_shape, b_shape).all():
-    #         _simple_zip(0, len(out_shape), [], out, out_shape, out_strides, a_storage, a_shape, a_strides, b_storage, b_shape, b_strides)
-    #     elif len(a_shape) <= len(out_shape) and shape_broadcast(a_shape, out_shape) == out_shape:
-    #         assert len(a_shape) == len(b_shape), f"Shape mismatch: input shape: {a_shape}, b shape: {b_shape}"
-    #         _broadcasted_zip(0, len(out_shape), out, [], out_shape, out_strides, a_storage, [], a_shape, a_strides, b_storage, [], b_shape, b_strides)
-
-    # def _simple_zip(
-    #     dep: int,
-    #     max_dep: int,
-    #     index: List[int],
-    #     out_storage: Storage,
-    #     out_shape: Shape,
-    #     out_strides: Strides,
-    #     a_storage: Storage,
-    #     a_shape: Shape,
-    #     a_strides: Strides,
-    #     b_storage: Storage,
-    #     b_shape: Shape,
-    #     b_strides: Strides,
-    # ):
-    #     if dep == max_dep:
-    #         out_pos = index_to_position(index, out_strides)
-    #         a_pos = index_to_position(index, a_strides)
-    #         b_pos = index_to_position(index, b_strides)
-    #         out_storage[out_pos] = fn(a_storage[a_pos], b_storage[b_pos])
-    #         return
-        
-    #     for i in range(out_shape[dep]):
-    #         index.append(i)
-    #         _simple_zip(dep + 1, max_dep, index, out_storage, out_shape, out_strides, a_storage, a_shape, a_strides, b_storage, b_shape, b_strides)
-    #         index.pop()
-    
-    # def _broadcasted_zip(
-    #     dep: int,
-    #     max_dep: int,
-    #     out_storage: Storage,
-    #     out_index: Sequence[int],
-    #     out_shape: Shape,
-    #     out_strides: Strides,
-    #     a_storage: Storage,
-    #     a_index: Sequence[int],
-    #     a_shape: Shape,
-    #     a_strides: Strides,
-    #     b_storage: Storage,
-    #     b_index: Sequence[int],
-    #     b_shape: Shape,
-    #     b_strides: Strides,
-    # ):
-    #     diff = _shape_size_diff(out_shape, a_shape)
-    #     if dep == max_dep:
-    #         out_pos = index_to_position(out_index, out_strides)
-    #         a_pos = index_to_position(a_index, a_strides)
-    #         b_pos = index_to_position(b_index, b_strides)
-    #         out[out_pos] = fn(a_storage[a_pos], b_storage[b_pos])
-    #         return
-        
-    #     for i in range(out_shape[dep]):
-    #         if dep < diff:
-    #             out_index.append(i)
-    #             _broadcasted_zip(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, a_storage, a_index, a_shape, a_strides, b_storage, b_index, b_shape, b_strides)
-    #             out_index.pop()
-    #         elif a_shape[dep] == 1:
-    #             out_index.append(i)
-    #             a_index.append(0)
-    #             b_index.append(0)
-    #             _broadcasted_zip(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, a_storage, a_index, a_shape, a_strides, b_storage, b_index, b_shape, b_strides)
-    #             out_index.pop()
-    #             a_index.pop()
-    #             b_index.pop()
-    #         else:
-    #             assert a_shape[dep] == out_shape[dep], f"Shape mismatch: input shape: {a_shape}, output shape: {out_shape}"
-    #             out_index.append(i)
-    #             a_index.append(i)
-    #             b_index.append(i)
-    #             _broadcasted_zip(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, a_storage, a_index, a_shape, a_strides, b_storage, b_index, b_shape, b_strides)
-    #             out_index.pop()
-    #             a_index.pop()
-    #             b_index.pop()
-
     return _zip
 
 
-def tensor_reduce(fn: Callable[[float, float], float]) -> Any:
+def tensor_reduce(
+    fn: Callable[[float, float], float],
+) -> Callable[[Storage, Shape, Strides, Storage, Shape, Strides, int], None]:
     """
     Low-level implementation of tensor reduce.
 
@@ -639,61 +527,6 @@ def tensor_reduce(fn: Callable[[float, float], float]) -> Any:
             a_reduce_indices = a_indices + np.ones_like(a_indices) * i * a_strides[reduce_dim]
             out[out_indices] = np.vectorize(fn)(out[out_indices], a_storage[a_reduce_indices])
         return
-        
-        
-    # def _reduce_(
-    #     out: Storage,
-    #     out_shape: Shape,
-    #     out_strides: Strides,
-    #     a_storage: Storage,
-    #     a_shape: Shape,
-    #     a_strides: Strides,
-    #     reduce_dim: int,
-    # ) -> None:
-    #     _recursive_reduce(
-    #         0,
-    #         len(out_shape),
-    #         out,
-    #         [],
-    #         out_shape,
-    #         out_strides,
-    #         a_storage,
-    #         [],
-    #         a_shape,
-    #         a_strides,
-    #         reduce_dim,
-    #     )
-
-    # def _recursive_reduce(
-    #     dep: int,
-    #     max_dep: int,
-    #     out_storage: Storage,
-    #     out_index: List[int],
-    #     out_shape: Shape,
-    #     out_strides: Strides,
-    #     in_storage: Storage,
-    #     in_index: List[int],
-    #     in_shape: Shape,
-    #     in_strides: Strides,
-    #     reduce_dim: int,
-    # ):
-    #     if dep == max_dep:
-    #         out_pos = index_to_position(out_index, out_strides)
-    #         for i in range(in_shape[reduce_dim]):
-    #             in_index[reduce_dim] = i
-    #             in_pos = index_to_position(in_index, in_strides)
-    #             if i == 0:
-    #                 out_storage[out_pos] = in_storage[in_pos]
-    #             else:
-    #                 out_storage[out_pos] = fn(out_storage[out_pos], in_storage[in_pos])
-    #         return
-
-    #     for i in range(out_shape[dep]):
-    #         in_index.append(i)
-    #         out_index.append(i)
-    #         _recursive_reduce(dep + 1, max_dep, out_storage, out_index, out_shape, out_strides, in_storage, in_index, in_shape, in_strides, reduce_dim)
-    #         out_index.pop()
-    #         in_index.pop()
 
     return _reduce
 

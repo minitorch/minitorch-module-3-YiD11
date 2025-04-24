@@ -35,10 +35,9 @@ def njit(fn: Fn, **kwargs: Any) -> Fn:
 
 to_index = njit(to_index)
 index_to_position = njit(index_to_position)
-broadcast_index = njit(broadcast_index)
-index_broadcast = njit(index_broadcast)
-index_permutation = njit(index_permutation)
-shape_size_diff = njit(shape_size_diff)
+# broadcast_index = njit(broadcast_index)
+# index_broadcast = njit(index_broadcast)
+# shape_size_diff = njit(shape_size_diff)
 
 class FastOps(TensorOps):
     @staticmethod
@@ -162,8 +161,6 @@ def tensor_map(
 
     """
 
-    # fn = njit(fn)
-    
     def _map(
         out: Storage,
         out_shape: Shape,
@@ -202,8 +199,6 @@ def tensor_zip(
 
     """
     
-    fn = njit(fn)
-
     def _zip(
         out: Storage,
         out_shape: Shape,
@@ -253,15 +248,28 @@ def tensor_reduce(
         a_strides: Strides,
         reduce_dim: int,
     ) -> None:
+        if len(a_shape) == 1:
+            for i in prange(a_shape[0]):
+                out[0] = fn(out[0], a_storage[i])
+            return
+            
+        a_broad_shape = np.zeros(a_shape[0] - 1, dtype=np.int32)
+        a_broad_strides = np.ones(a_strides[0] - 1, dtype=np.int32)
+        for i in prange(reduce_dim):
+            a_broad_shape[i] = a_shape[i]
+            a_broad_shape[i + reduce_dim + 1] = a_shape[i + reduce_dim]
+            a_broad_strides[i] = a_strides[i]
+            a_broad_strides[i + reduce_dim + 1] = a_strides[i + reduce_dim]
+        
         a_indices = index_permutation(
-            np.concatenate([a_shape[:reduce_dim], a_shape[reduce_dim + 1:]], axis=0),
-            np.concatenate([a_strides[:reduce_dim], a_strides[reduce_dim + 1:]], axis=0),
+            a_broad_shape,
+            a_broad_strides,
         )
         out_indices = index_permutation(out_shape, out_strides)
         for i in prange(a_shape[reduce_dim]):
             a_reduce_indices = a_indices + np.ones_like(a_indices) * i * a_strides[reduce_dim]
-            out[out_indices] = np.vectorize(fn)(out[out_indices], a_storage[a_reduce_indices])
-        return
+            for j in prange(len(out_indices)):
+                out[out_indices[j]] = fn(out[out_indices[j]], a_storage[a_reduce_indices[j]])
 
     return njit(_reduce, parallel=True)  # type: ignore
 
