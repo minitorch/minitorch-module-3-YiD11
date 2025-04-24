@@ -169,9 +169,14 @@ def tensor_map(
         in_shape: Shape,
         in_strides: Strides,
     ) -> None:
+        if np.all(out_strides == in_strides):
+            for i in prange(len(out)):
+                out[i] = fn(in_storage[i])
+            return
+        
         out_indices, in_indices = index_broadcast(out_shape, out_strides, in_shape, in_strides)
         for i in prange(len(out_indices)):
-            out[out_indices[i]] = fn(in_storage[in_indices[i]])
+            out[out_indices[i]] = fn(in_storage[in_indices[i]]) # type: ignore
 
     return njit(_map, parallel=True)  # type: ignore
 
@@ -210,10 +215,15 @@ def tensor_zip(
         b_shape: Shape,
         b_strides: Strides,
     ) -> None:
+        if np.all(out_strides == a_strides) and np.all(out_strides == b_strides):
+            for i in prange(len(out)):
+                out[i] = fn(a_storage[i], b_storage[i])
+            return
+        
         out_indices, a_indices = index_broadcast(out_shape, out_strides, a_shape, a_strides)
         _, b_indices = index_broadcast(out_shape, out_strides, b_shape, b_strides)
         for i in prange(len(out_indices)):
-            out[out_indices[i]] = fn(a_storage[a_indices[i]], b_storage[b_indices[i]])
+            out[out_indices[i]] = fn(a_storage[a_indices[i]], b_storage[b_indices[i]]) # type: ignore
 
     return njit(_zip, parallel=True)  # type: ignore
 
@@ -269,7 +279,7 @@ def tensor_reduce(
         for i in prange(a_shape[reduce_dim]):
             a_reduce_indices = a_indices + np.ones_like(a_indices) * i * a_strides[reduce_dim]
             for j in prange(len(out_indices)):
-                out[out_indices[j]] = fn(out[out_indices[j]], a_storage[a_reduce_indices[j]])
+                out[out_indices[j]] = fn(out[out_indices[j]], a_storage[a_reduce_indices[j]]) # type: ignore
 
     return njit(_reduce, parallel=True)  # type: ignore
 
@@ -317,12 +327,22 @@ def _tensor_matrix_multiply(
         None : Fills in `out`
 
     """
+    out_outer_indices, a_outer_indices = index_broadcast(out_shape[:-2], out_strides[:-2], a_shape[:-2], a_strides[:-2])
+    _, b_outer_indices = index_broadcast(out_shape[:-2], out_strides[:-2], b_shape[:-2], b_strides[:-2])
     a_batch_stride = a_strides[0] if a_shape[0] > 1 else 0
     b_batch_stride = b_strides[0] if b_shape[0] > 1 else 0
 
-    # TODO: Implement for Task 3.2.
-    raise NotImplementedError("Need to implement for Task 3.2")
-
+    for i in prange(len(out_outer_indices)):
+        out_outer_index = out_outer_indices[i]
+        a_outer_index = a_outer_indices[i]
+        b_outer_index = b_outer_indices[i]
+        for j in prange(out_shape[-2]):
+            for k in prange(out_shape[-1]):
+                for l in prange(a_shape[-1]):
+                    out[out_outer_index + j * out_strides[-2] + k * out_strides[-1]] += (
+                        a_storage[a_outer_index + j * a_strides[-2] + l * a_strides[-1]]
+                        * b_storage[b_outer_index + l * b_strides[-2] + k * b_strides[-1]]
+                    )
 
 tensor_matrix_multiply = njit(_tensor_matrix_multiply, parallel=True)
 assert tensor_matrix_multiply is not None
