@@ -13,7 +13,7 @@ import minitorch
 
 from . import operators
 from .autodiff import Context
-from .tensor_ops import SimpleBackend, TensorBackend
+from .tensor_ops import SimpleBackend, TensorBackend, index_permutation
 
 if TYPE_CHECKING:
     from typing import Any, List, Tuple
@@ -159,16 +159,28 @@ class Exp(Function):
 class Sum(Function):
     @staticmethod
     def forward(ctx: Context, a: Tensor, dim: Tensor) -> Tensor:
-        ctx.save_for_backward(a.shape, dim)
-        return a.f.add_reduce(a, int(dim.item()))
+        reduce_dim = int(dim.item())
+        ctx.save_for_backward(a.shape, reduce_dim, a.backend)
+        return a.f.add_reduce(a, reduce_dim)
 
     @staticmethod
     def backward(ctx: Context, grad_output: Tensor) -> Tuple[Tensor, float]:
-        a_shape, dim = ctx.saved_values
-        ret = minitorch.zeros(a_shape)
-        ret_grad = ret.expand(grad_output)
-        # assert np.equal(grad_output.shape, a_shape).all(), f"grad_output shape = {grad_output.shape}, a_shape = {a_shape}, dim = {int(dim.item())}"
-        return ret_grad, 0.0
+        a_shape, reduce_dim, backend = ctx.saved_values
+        ret = minitorch.zeros(shape=a_shape, backend=backend)
+        if len(a_shape) == 1:
+            ret._tensor._storage[np.arange(a_shape[0])] = grad_output.item()
+            return ret, 0.0
+        ret_stride = ret._tensor.strides[reduce_dim]
+        broad_shape = np.array(grad_output.shape, dtype = np.int32)
+        grad_strides = np.array(grad_output._tensor._strides, dtype=np.int32)
+        broad_shape_cumprod = np.cumprod(grad_output.shape)
+        broad_strides = broad_shape_cumprod[-1] // broad_shape_cumprod
+        broad_indices = index_permutation(broad_shape, broad_strides)
+        grad_indices = index_permutation(broad_shape, grad_strides)
+        for i in range(a_shape[reduce_dim]):
+            ret_indices = broad_indices + np.ones_like(broad_indices) * i * ret_stride
+            ret._tensor._storage[ret_indices] = grad_output._tensor._storage[grad_indices]
+        return ret, 0.0
 
 
 class All(Function):
@@ -289,7 +301,7 @@ def zeros(shape: UserShape, backend: TensorBackend = SimpleBackend) -> Tensor:
         new tensor
     """
     return minitorch.Tensor.make(
-        [0] * int(operators.prod(shape)), shape, backend=backend
+        [0.0] * int(np.prod(shape)), shape, backend=backend
     )
 
 

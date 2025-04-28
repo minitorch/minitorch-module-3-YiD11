@@ -59,7 +59,7 @@ def inv_back(a: float, b: float) -> float:
         raise ZeroDivisionError("Division by zero is not allowed.")
     return -b / (a * a)
 
-def lt(a: float, b: float) -> float:
+def lt(a: float, b: float) -> bool:
     """Less than."""
     return a < b
 
@@ -81,7 +81,7 @@ def sigmoid(a: float) -> float:
 
 def relu(a: float) -> float:
     """ReLU function."""
-    return max(0.0, a)
+    return a if a > 0 else 0.0
 
 def log(a: float) -> float:
     """Natural logarithm."""

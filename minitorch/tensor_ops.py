@@ -267,7 +267,7 @@ def index_permutation(shape: Shape, strides: Strides) -> npt.NDArray[np.int32]:
     indices = np.arange(permut_size)
     ret = np.zeros((permut_size,), dtype=np.int32)
     for i in range(dim_size):
-        real_stride = shape_cumprod[-1] // shape_cumprod[i]
+        real_stride = shape_cumprod[-1] // shape_cumprod[i] # strides may not match the shape
         ret[indices] += (indices // real_stride) % shape[i] * strides[i]
     return ret
 
@@ -280,8 +280,100 @@ def index_permutation_pair(index1: npt.NDArray[np.int32], index2: npt.NDArray[np
     n = n1 * n2
     ret = np.zeros((n), dtype=np.int32)
     ret_index_permut = np.arange(n)
-    ret[ret_index_permut] = index1[ret_index_permut // n2 % n1] + index1[ret_index_permut % n2]
+    ret[ret_index_permut] = index1[ret_index_permut // n2 % n1] + index2[ret_index_permut % n2]
     return ret
+
+def fast_index_broadcast(
+        out_shape: Shape,
+        out_strides: Strides,
+        in_shape: Shape,
+        in_strides: Strides,
+) -> tuple[Index, Index]:
+    """
+    Computes the broadcasted indices for input and output tensors based on their shapes and strides.
+        This function calculates the indices required to map elements from an input tensor
+        to an output tensor when broadcasting is applied. It ensures that the input tensor
+        can be broadcast to match the output tensor's shape and computes the corresponding
+        indices for both tensors.
+    Args:
+        out_shape (Shape): The shape of the output tensor.
+        out_strides (Strides): The strides of the output tensor.
+        in_shape (Shape): The shape of the input tensor.
+        in_strides (Strides): The strides of the input tensor.
+    Returns:
+        tuple[Sequence[int], Sequence[int]]: A tuple containing two sequences:
+            - The indices for the output tensor.
+            - The indices for the input tensor.
+    Raises:
+        AssertionError: If the input shape cannot be broadcast to the output shape.
+    Notes:
+        - Broadcasting rules are applied to align the input tensor's shape with the
+            output tensor's shape.
+        - The function handles cases where the input tensor's shape has fewer dimensions
+            than the output tensor's shape by extending the input shape with ones.
+        - The indices are computed in a way that respects the broadcasting semantics.
+    Example:
+        Given an input tensor of shape (1, 3) and an output tensor of shape (2, 3),
+        this function computes the indices required to broadcast the input tensor
+        to match the output tensor.
+    """
+    diff_num = shape_size_diff(out_shape, in_shape)
+    in_shape_extend = np.ones((diff_num + len(in_shape)), dtype=np.int32)
+    in_shape_extend[diff_num:] = in_shape
+    in_strides_extend = np.zeros((diff_num + len(in_shape)), dtype=np.int32)
+    in_strides_extend[diff_num:] = in_strides    
+
+    diff_indices = np.where(in_shape_extend != out_shape)[0]
+    same_indices = np.where(in_shape_extend == out_shape)[0]
+    
+    diff_indices_size = len(diff_indices)
+    same_indices_size = len(same_indices)
+    
+    in_shape_reorder = np.empty_like(in_shape_extend, dtype=np.int32)
+    in_strides_reorder = np.empty_like(in_strides_extend, dtype=np.int32)
+    out_shape_reorder = np.empty_like(out_shape, dtype=np.int32)
+    out_strides_reorder = np.empty_like(out_strides, dtype=np.int32)
+
+    # in_shape_reorder[np.arange(diff_indices_size)] = in_shape_extend[diff_indices]
+    # in_shape_reorder[np.arange(same_indices_size) + diff_indices_size] = in_shape_extend[same_indices]
+    # in_strides_reorder[np.arange(diff_indices_size)] = in_strides_extend[diff_indices]
+    # in_strides_reorder[np.arange(same_indices_size) + diff_indices_size] = in_strides_extend[same_indices]
+    # out_shape_reorder[np.arange(diff_indices_size)] = out_shape[diff_indices]
+    # out_shape_reorder[np.arange(same_indices_size) + diff_indices_size] = out_shape[same_indices]
+    # out_strides_reorder[np.arange(diff_indices_size)] = out_strides[diff_indices]
+    # out_strides_reorder[np.arange(same_indices_size) + diff_indices_size] = out_strides[same_indices]
+
+    for i in prange(diff_indices_size):
+        in_shape_reorder    [i] = in_shape_extend   [diff_indices[i]]
+        in_strides_reorder  [i] = in_strides_extend [diff_indices[i]]
+        out_shape_reorder   [i] = out_shape         [diff_indices[i]]
+        out_strides_reorder [i] = out_strides       [diff_indices[i]]
+    for i in prange(same_indices_size):
+        in_shape_reorder   [diff_indices_size + i] = in_shape_extend    [same_indices[i]]
+        in_strides_reorder [diff_indices_size + i] = in_strides_extend  [same_indices[i]]
+        out_shape_reorder  [diff_indices_size + i] = out_shape          [same_indices[i]]
+        out_strides_reorder[diff_indices_size + i] = out_strides        [same_indices[i]]
+
+    if same_indices_size == 0:
+        in_indices = index_permutation(in_shape_reorder[:diff_indices_size], in_strides_reorder[:diff_indices_size])
+        out_indices = index_permutation(out_shape_reorder[:diff_indices_size], out_strides_reorder[:diff_indices_size])
+    elif diff_indices_size == 0:
+        in_indices = index_permutation(in_shape_reorder[diff_indices_size:], in_strides_reorder[diff_indices_size:])
+        out_indices = index_permutation(out_shape_reorder[diff_indices_size:], out_strides_reorder[diff_indices_size:])
+    else:
+        in_left_indices = index_permutation(in_shape_reorder[:diff_indices_size], in_strides_reorder[:diff_indices_size])
+        in_right_indices = index_permutation(in_shape_reorder[diff_indices_size:], in_strides_reorder[diff_indices_size:])
+        
+        out_left_indices = index_permutation(out_shape_reorder[:diff_indices_size], out_strides_reorder[:diff_indices_size])
+        out_right_indices = index_permutation(out_shape_reorder[diff_indices_size:], out_strides_reorder[diff_indices_size:])
+
+        in_indices = index_permutation_pair(in_left_indices, in_right_indices)
+        out_indices = index_permutation_pair(out_left_indices, out_right_indices)
+
+    in_aligned_indices = np.zeros((out_indices.shape[0],), dtype=np.int32)
+    for i in prange(out_indices.shape[0] // in_indices.shape[0]):
+        in_aligned_indices[i * len(in_indices) : (i + 1) * len(in_indices)] = in_indices
+    return out_indices, in_aligned_indices
 
 def index_broadcast(
         out_shape: Shape,
@@ -328,29 +420,20 @@ def index_broadcast(
     
     diff_indices_size = len(diff_indices)
     same_indices_size = len(same_indices)
-    in_shape_reorder = np.empty_like(in_shape_extend, dtype=np.int32)
-    for i in prange(diff_indices_size):
-        in_shape_reorder[i] = in_shape_extend[diff_indices[i]]
-    for i in prange(len(same_indices)):
-        in_shape_reorder[diff_indices_size + i] = in_shape_extend[same_indices[i]]
-
-    in_strides_reorder = np.empty_like(in_strides_extend, dtype=np.int32)
-    for i in prange(diff_indices_size):
-        in_strides_reorder[i] = in_strides_extend[diff_indices[i]]
-    for i in prange(len(same_indices)):
-        in_strides_reorder[diff_indices_size + i] = in_strides_extend[same_indices[i]]
     
-    out_shape_reorder = np.empty_like(out_shape, dtype=np.int32)
-    for i in prange(diff_indices_size):
-        out_shape_reorder[i] = out_shape[diff_indices[i]]
-    for i in prange(len(same_indices)):
-        out_shape_reorder[diff_indices_size + i] = out_shape[same_indices[i]]
-
+    in_shape_reorder    = np.empty_like(in_shape_extend, dtype=np.int32)
+    in_strides_reorder  = np.empty_like(in_strides_extend, dtype=np.int32)
+    out_shape_reorder   = np.empty_like(out_shape, dtype=np.int32)
     out_strides_reorder = np.empty_like(out_strides, dtype=np.int32)
-    for i in prange(len(diff_indices)):
-        out_strides_reorder[i] = out_strides[diff_indices[i]]
-    for i in prange(len(same_indices)):
-        out_strides_reorder[len(diff_indices) + i] = out_strides[same_indices[i]]
+    
+    in_shape_reorder    [np.arange(diff_indices_size)]                      = in_shape_extend   [diff_indices]
+    in_shape_reorder    [np.arange(same_indices_size) + diff_indices_size]  = in_shape_extend   [same_indices]
+    in_strides_reorder  [np.arange(diff_indices_size)]                      = in_strides_extend [diff_indices]
+    in_strides_reorder  [np.arange(same_indices_size) + diff_indices_size]  = in_strides_extend [same_indices]
+    out_shape_reorder   [np.arange(diff_indices_size)]                      = out_shape         [diff_indices]
+    out_shape_reorder   [np.arange(same_indices_size) + diff_indices_size]  = out_shape         [same_indices]
+    out_strides_reorder [np.arange(diff_indices_size)]                      = out_strides       [diff_indices]
+    out_strides_reorder [np.arange(same_indices_size) + diff_indices_size]  = out_strides       [same_indices]
 
     if same_indices_size == 0:
         in_left_indices = index_permutation(in_shape_reorder[:diff_indices_size], in_strides_reorder[:diff_indices_size])
@@ -373,13 +456,13 @@ def index_broadcast(
         out_indices = index_permutation_pair(out_left_indices, out_right_indices)
 
     in_aligned_indices = np.zeros((out_indices.shape[0],), dtype=np.int32)
-    for i in prange(out_indices.shape[0] // in_indices.shape[0]):
+    for i in range(out_indices.shape[0] // in_indices.shape[0]):
         in_aligned_indices[i * len(in_indices) : (i + 1) * len(in_indices)] = in_indices
     return out_indices, in_aligned_indices
 
 shape_size_diff = njit(shape_size_diff)
-index_broadcast = njit(index_broadcast)
 index_permutation = njit(index_permutation)
+fast_index_broadcast = njit(fast_index_broadcast)
 index_permutation_pair = njit(index_permutation_pair)
 
 def tensor_map(

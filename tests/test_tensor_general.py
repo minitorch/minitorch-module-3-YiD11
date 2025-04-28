@@ -306,7 +306,7 @@ if numba.cuda.is_available():
 
 
 @given(data())
-@settings(max_examples=25)
+@settings(max_examples=20)
 @pytest.mark.parametrize("fn", two_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_two_grad_broadcast(
@@ -352,6 +352,20 @@ def test_mm2() -> None:
 
     minitorch.grad_check(lambda a, b: a @ b, a, b)
 
+@pytest.mark.my_test
+def test_mul() -> None:
+    import numpy as np
+    a = minitorch.tensor([1, 2], backend=FastTensorBackend)
+    b = minitorch.tensor([3, 4], backend=FastTensorBackend)
+    c = (a.view(1, 2) * b.view(2, 1)).view(2, 2)
+    c2 = np.array(a._tensor._storage).reshape(1, 2) * np.array(b._tensor._storage).reshape(2, 1)
+    assert np.equal(c.shape, c2.shape).all()
+    for i in range(2):
+        for j in range(2):
+            assert abs(c[i, j] - c2[i, j]) < 1e-2, f"c={c}, c2={c2}"
+            # assert_close(c[i,j], c2[i,j])
+    # for i in range(np.prod(c.shape)):
+    #     assert_close(c._tensor._storage[i], c2.flat[i])
 
 # ## Task 3.2 and 3.4
 

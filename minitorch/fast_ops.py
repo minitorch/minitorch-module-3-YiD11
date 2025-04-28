@@ -13,7 +13,13 @@ from .tensor_data import (
     shape_broadcast,
     to_index,
 )
-from .tensor_ops import MapProto, TensorOps, index_broadcast, index_permutation, shape_size_diff
+from .tensor_ops import (
+    MapProto,
+    TensorOps,
+    index_broadcast,
+    index_permutation,
+    fast_index_broadcast,
+)
 
 if TYPE_CHECKING:
     from typing import Callable, Optional
@@ -35,16 +41,14 @@ def njit(fn: Fn, **kwargs: Any) -> Fn:
 
 to_index = njit(to_index)
 index_to_position = njit(index_to_position)
-# broadcast_index = njit(broadcast_index)
-# index_broadcast = njit(index_broadcast)
-# shape_size_diff = njit(shape_size_diff)
 
 class FastOps(TensorOps):
     @staticmethod
     def map(fn: Callable[[float], float]) -> MapProto:
         """See `tensor_ops.py`"""
         # This line JIT compiles your tensor_map
-        f = tensor_map(njit(fn))
+        fn = njit(fn)
+        f = tensor_map(fn)
 
         def ret(a: Tensor, out: Optional[Tensor] = None) -> Tensor:
             if out is None:
@@ -57,7 +61,8 @@ class FastOps(TensorOps):
     @staticmethod
     def zip(fn: Callable[[float, float], float]) -> Callable[[Tensor, Tensor], Tensor]:
         """See `tensor_ops.py`"""
-        f = tensor_zip(njit(fn))
+        fn = njit(fn)
+        f = tensor_zip(fn)
 
         def ret(a: Tensor, b: Tensor) -> Tensor:
             c_shape = shape_broadcast(a.shape, b.shape)
@@ -72,7 +77,8 @@ class FastOps(TensorOps):
         fn: Callable[[float, float], float], start: float = 0.0
     ) -> Callable[[Tensor, int], Tensor]:
         """See `tensor_ops.py`"""
-        f = tensor_reduce(njit(fn))
+        fn = njit(fn)
+        f = tensor_reduce(fn)
 
         def ret(a: Tensor, dim: int) -> Tensor:
             out_shape = list(a.shape)
@@ -169,15 +175,20 @@ def tensor_map(
         in_shape: Shape,
         in_strides: Strides,
     ) -> None:
-        if np.all(out_strides == in_strides):
+        if (len(out_shape) == len(in_shape)
+            and len(out_strides) == len(in_strides)
+            and np.equal(out_shape, in_shape).all()
+            and np.equal(out_strides, in_strides).all()
+        ):
             for i in prange(len(out)):
                 out[i] = fn(in_storage[i])
             return
         
-        out_indices, in_indices = index_broadcast(out_shape, out_strides, in_shape, in_strides)
+        out_indices, in_indices = fast_index_broadcast(out_shape, out_strides, in_shape, in_strides)
         for i in prange(len(out_indices)):
             out[out_indices[i]] = fn(in_storage[in_indices[i]]) # type: ignore
 
+    # return _map
     return njit(_map, parallel=True)  # type: ignore
 
 
@@ -215,16 +226,29 @@ def tensor_zip(
         b_shape: Shape,
         b_strides: Strides,
     ) -> None:
-        if np.all(out_strides == a_strides) and np.all(out_strides == b_strides):
+        if (len(out_shape) == len(a_shape)
+            and len(out_shape) == len(b_shape)
+            and len(out_strides) == len(a_strides)
+            and len(out_strides) == len(b_strides)
+            and np.equal(out_shape, a_shape).all()
+            and np.equal(out_shape, b_shape).all()
+            and np.equal(out_strides, a_strides).all()
+            and np.equal(out_strides, b_strides).all()
+        ):
             for i in prange(len(out)):
                 out[i] = fn(a_storage[i], b_storage[i])
             return
         
-        out_indices, a_indices = index_broadcast(out_shape, out_strides, a_shape, a_strides)
-        _, b_indices = index_broadcast(out_shape, out_strides, b_shape, b_strides)
+        out_indices, a_indices = fast_index_broadcast(out_shape, out_strides, a_shape, a_strides)
+        out_indices2, b_indices = fast_index_broadcast(out_shape, out_strides, b_shape, b_strides)
+        order = np.argsort(out_indices)
+        out_indices = out_indices[order]
+        a_indices = a_indices[order]
+        b_indices = b_indices[np.argsort(out_indices2)]
         for i in prange(len(out_indices)):
             out[out_indices[i]] = fn(a_storage[a_indices[i]], b_storage[b_indices[i]]) # type: ignore
 
+    # return _zip
     return njit(_zip, parallel=True)  # type: ignore
 
 
@@ -259,28 +283,25 @@ def tensor_reduce(
         reduce_dim: int,
     ) -> None:
         if len(a_shape) == 1:
-            for i in prange(a_shape[0]):
+            for i in range(a_shape[0]):
                 out[0] = fn(out[0], a_storage[i])
             return
             
-        a_broad_shape = np.zeros(a_shape[0] - 1, dtype=np.int32)
-        a_broad_strides = np.ones(a_strides[0] - 1, dtype=np.int32)
-        for i in prange(reduce_dim):
-            a_broad_shape[i] = a_shape[i]
-            a_broad_shape[i + reduce_dim + 1] = a_shape[i + reduce_dim]
-            a_broad_strides[i] = a_strides[i]
-            a_broad_strides[i + reduce_dim + 1] = a_strides[i + reduce_dim]
+        a_broad_shape = np.zeros(len(a_shape) - 1, dtype=np.int32)
+        a_broad_strides = np.ones(len(a_strides) - 1, dtype=np.int32)
+        a_broad_shape[:reduce_dim] = a_shape[:reduce_dim]
+        a_broad_strides[:reduce_dim] = a_strides[:reduce_dim]
+        a_broad_shape[reduce_dim:] = a_shape[reduce_dim + 1:]
+        a_broad_strides[reduce_dim:] = a_strides[reduce_dim + 1:]
         
-        a_indices = index_permutation(
-            a_broad_shape,
-            a_broad_strides,
-        )
+        a_indices = index_permutation(a_broad_shape, a_broad_strides)
         out_indices = index_permutation(out_shape, out_strides)
-        for i in prange(a_shape[reduce_dim]):
+        for i in range(a_shape[reduce_dim]):
             a_reduce_indices = a_indices + np.ones_like(a_indices) * i * a_strides[reduce_dim]
-            for j in prange(len(out_indices)):
+            for j in range(len(out_indices)):
                 out[out_indices[j]] = fn(out[out_indices[j]], a_storage[a_reduce_indices[j]]) # type: ignore
 
+    # return _reduce
     return njit(_reduce, parallel=True)  # type: ignore
 
 
@@ -327,10 +348,12 @@ def _tensor_matrix_multiply(
         None : Fills in `out`
 
     """
-    out_outer_indices, a_outer_indices = index_broadcast(out_shape[:-2], out_strides[:-2], a_shape[:-2], a_strides[:-2])
-    _, b_outer_indices = index_broadcast(out_shape[:-2], out_strides[:-2], b_shape[:-2], b_strides[:-2])
-    a_batch_stride = a_strides[0] if a_shape[0] > 1 else 0
-    b_batch_stride = b_strides[0] if b_shape[0] > 1 else 0
+    out_outer_indices, a_outer_indices = fast_index_broadcast(out_shape[:-2], out_strides[:-2], a_shape[:-2], a_strides[:-2])
+    out_outer_indices2, b_outer_indices = fast_index_broadcast(out_shape[:-2], out_strides[:-2], b_shape[:-2], b_strides[:-2])
+    order = np.argsort(out_outer_indices)
+    out_outer_indices = out_outer_indices[order]
+    a_indices = a_outer_indices[order]
+    b_indices = b_outer_indices[np.argsort(out_outer_indices2)]
 
     for i in prange(len(out_outer_indices)):
         out_outer_index = out_outer_indices[i]
@@ -338,11 +361,13 @@ def _tensor_matrix_multiply(
         b_outer_index = b_outer_indices[i]
         for j in prange(out_shape[-2]):
             for k in prange(out_shape[-1]):
-                for l in prange(a_shape[-1]):
-                    out[out_outer_index + j * out_strides[-2] + k * out_strides[-1]] += (
-                        a_storage[a_outer_index + j * a_strides[-2] + l * a_strides[-1]]
-                        * b_storage[b_outer_index + l * b_strides[-2] + k * b_strides[-1]]
-                    )
+                out_inner_index = j * out_strides[-2] + k * out_strides[-1]
+                a_indices = np.arange(a_shape[-1], dtype=np.int32) * a_strides[-1] + j * a_strides[-2] + a_outer_index
+                b_indices = np.arange(b_shape[-2], dtype=np.int32) * b_strides[-2] + k * b_strides[-1] + b_outer_index
+                out[out_outer_index + out_inner_index] = np.sum(
+                    a_storage[a_indices] * b_storage[b_indices]
+                )
 
+# tensor_matrix_multiply = _tensor_matrix_multiply
 tensor_matrix_multiply = njit(_tensor_matrix_multiply, parallel=True)
 assert tensor_matrix_multiply is not None
