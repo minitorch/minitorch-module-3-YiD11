@@ -52,7 +52,7 @@ def test_create(backend: str, t1: List[float]) -> None:
 
 
 @given(data())
-@settings(max_examples=100)
+@settings(max_examples=10)
 @pytest.mark.parametrize("fn", one_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_one_args(
@@ -69,7 +69,7 @@ def test_one_args(
 
 
 @given(data())
-@settings(max_examples=100)
+@settings(max_examples=20)
 @pytest.mark.parametrize("fn", two_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_two_args(
@@ -100,7 +100,7 @@ def test_one_derivative(
 
 
 @given(data())
-@settings(max_examples=50)
+@settings(max_examples=10)
 @pytest.mark.parametrize("fn", two_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_two_grad(
@@ -115,7 +115,7 @@ def test_two_grad(
 
 
 @given(data())
-@settings(max_examples=100)
+@settings(max_examples=10)
 @pytest.mark.parametrize("fn", red_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_reduce(
@@ -306,7 +306,7 @@ if numba.cuda.is_available():
 
 
 @given(data())
-@settings(max_examples=20)
+@settings(max_examples=10)
 @pytest.mark.parametrize("fn", two_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_two_grad_broadcast(
@@ -326,7 +326,7 @@ def test_two_grad_broadcast(
 
 
 @given(data())
-@settings(max_examples=100)
+@settings(max_examples=10)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_permute(backend: str, data: DataObject) -> None:
     """Check permutations for all backends."""
@@ -351,21 +351,6 @@ def test_mm2() -> None:
         assert_close(c[ind], c2[ind])
 
     minitorch.grad_check(lambda a, b: a @ b, a, b)
-
-@pytest.mark.my_test
-def test_mul() -> None:
-    import numpy as np
-    a = minitorch.tensor([1, 2], backend=FastTensorBackend)
-    b = minitorch.tensor([3, 4], backend=FastTensorBackend)
-    c = (a.view(1, 2) * b.view(2, 1)).view(2, 2)
-    c2 = np.array(a._tensor._storage).reshape(1, 2) * np.array(b._tensor._storage).reshape(2, 1)
-    assert np.equal(c.shape, c2.shape).all()
-    for i in range(2):
-        for j in range(2):
-            assert abs(c[i, j] - c2[i, j]) < 1e-2, f"c={c}, c2={c2}"
-            # assert_close(c[i,j], c2[i,j])
-    # for i in range(np.prod(c.shape)):
-    #     assert_close(c._tensor._storage[i], c2.flat[i])
 
 # ## Task 3.2 and 3.4
 

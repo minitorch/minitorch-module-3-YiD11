@@ -4,6 +4,7 @@ import random
 from typing import Iterable, Optional, Sequence, Tuple, Union
 
 import numba
+import numba.cuda
 import numpy as np
 import numpy.typing as npt
 from numpy import array, float64

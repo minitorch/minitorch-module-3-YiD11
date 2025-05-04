@@ -178,8 +178,12 @@ class Sum(Function):
         broad_indices = index_permutation(broad_shape, broad_strides)
         grad_indices = index_permutation(broad_shape, grad_strides)
         for i in range(a_shape[reduce_dim]):
-            ret_indices = broad_indices + np.ones_like(broad_indices) * i * ret_stride
-            ret._tensor._storage[ret_indices] = grad_output._tensor._storage[grad_indices]
+            ret_indices = broad_indices + np.ones_like(broad_indices, dtype=np.int32) * i * ret_stride
+            if grad_output.backend.cuda:
+                for i in range(len(grad_indices)):
+                    ret._tensor._storage[ret_indices[i]] = grad_output._tensor._storage[grad_indices[i]]
+            else:
+                ret._tensor._storage[ret_indices] = grad_output._tensor._storage[grad_indices]
         return ret, 0.0
 
 

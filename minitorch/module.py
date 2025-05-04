@@ -160,6 +160,11 @@ class Parameter:
             if self.name:
                 self.value.name = self.name
 
+    def __getattr__(self, name: str):
+        if hasattr(self.value, name):
+            return getattr(self.value, name)
+        return getattr(self, name)
+
     def __repr__(self) -> str:
         return repr(self.value)
 
