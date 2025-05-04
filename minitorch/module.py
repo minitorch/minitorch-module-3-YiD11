@@ -31,11 +31,17 @@ class Module:
 
     def train(self) -> None:
         """Set the mode of this module and all descendent modules to `train`."""
-        raise NotImplementedError("Need to include this file from past assignment.")
+        self.training = True
+        for s, m in self._modules.items():
+            m.training = True
+            m.train()
 
     def eval(self) -> None:
         """Set the mode of this module and all descendent modules to `eval`."""
-        raise NotImplementedError("Need to include this file from past assignment.")
+        self.training = False
+        for s, m in self._modules.items():
+            m.training = False
+            m.eval()
 
     def named_parameters(self) -> Sequence[Tuple[str, Parameter]]:
         """Collect all the parameters of this module and its descendents.
@@ -45,11 +51,27 @@ class Module:
             The name and `Parameter` of each ancestor parameter.
 
         """
-        raise NotImplementedError("Need to include this file from past assignment.")
+        ret: Sequence[Tuple[str, Parameter]] = []
+        for name, param in self.__dict__['_parameters'].items():
+            ret.append((name, param))
+        
+        for name, module in self.__dict__['_modules'].items():
+            sub_params = module.named_parameters()
+            ret.extend(
+                ((name + "." + sub_name , sub_param) for sub_name, sub_param in sub_params)
+            )
+
+        return ret
 
     def parameters(self) -> Sequence[Parameter]:
         """Enumerate over all the parameters of this module and its descendents."""
-        raise NotImplementedError("Need to include this file from past assignment.")
+        ret: Sequence[Parameter] = []
+        for name, param in self.__dict__['_parameters'].items():
+            ret.append(param)
+        
+        for name, module in self.__dict__['_modules'].items():
+            ret.extend(module.parameters())
+        return ret
 
     def add_parameter(self, k: str, v: Any) -> Parameter:
         """Manually add a parameter. Useful helper for scalar parameters.
@@ -137,6 +159,11 @@ class Parameter:
             self.value.requires_grad_(True)
             if self.name:
                 self.value.name = self.name
+
+    def __getattr__(self, name: str):
+        if hasattr(self.value, name):
+            return getattr(self.value, name)
+        return getattr(self, name)
 
     def __repr__(self) -> str:
         return repr(self.value)

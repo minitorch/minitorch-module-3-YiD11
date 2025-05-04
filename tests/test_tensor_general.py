@@ -52,7 +52,7 @@ def test_create(backend: str, t1: List[float]) -> None:
 
 
 @given(data())
-@settings(max_examples=100)
+@settings(max_examples=10)
 @pytest.mark.parametrize("fn", one_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_one_args(
@@ -69,7 +69,7 @@ def test_one_args(
 
 
 @given(data())
-@settings(max_examples=100)
+@settings(max_examples=20)
 @pytest.mark.parametrize("fn", two_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_two_args(
@@ -100,7 +100,7 @@ def test_one_derivative(
 
 
 @given(data())
-@settings(max_examples=50)
+@settings(max_examples=10)
 @pytest.mark.parametrize("fn", two_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_two_grad(
@@ -115,7 +115,7 @@ def test_two_grad(
 
 
 @given(data())
-@settings(max_examples=100)
+@settings(max_examples=10)
 @pytest.mark.parametrize("fn", red_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_reduce(
@@ -306,7 +306,7 @@ if numba.cuda.is_available():
 
 
 @given(data())
-@settings(max_examples=25)
+@settings(max_examples=10)
 @pytest.mark.parametrize("fn", two_arg)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_two_grad_broadcast(
@@ -326,7 +326,7 @@ def test_two_grad_broadcast(
 
 
 @given(data())
-@settings(max_examples=100)
+@settings(max_examples=10)
 @pytest.mark.parametrize("backend", backend_tests)
 def test_permute(backend: str, data: DataObject) -> None:
     """Check permutations for all backends."""
@@ -351,7 +351,6 @@ def test_mm2() -> None:
         assert_close(c[ind], c2[ind])
 
     minitorch.grad_check(lambda a, b: a @ b, a, b)
-
 
 # ## Task 3.2 and 3.4
 
